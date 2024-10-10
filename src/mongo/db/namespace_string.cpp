@@ -154,7 +154,7 @@ bool NamespaceString::isLegalClientSystemNS() const {
  * Oplog entries on 'config.shards' should be processed one at a time, otherwise the in-memory state
  * that its kept on the TopologyTimeTicker might be wrong.
  *
- * Serialize updates to 'config.tenantMigrationDonors' and 'config.shardSplitDonors' to avoid races
+ * Serialize updates to 'config.tenantMigrationDonors' to avoid races
  * with creating tenant access blockers on secondaries.
  */
 bool NamespaceString::mustBeAppliedInOwnOplogBatch() const {
@@ -163,8 +163,7 @@ bool NamespaceString::mustBeAppliedInOwnOplogBatch() const {
         ns == kDonorReshardingOperationsNamespace.ns() ||
         ns == kForceOplogBatchBoundaryNamespace.ns() ||
         ns == kTenantMigrationDonorsNamespace.ns() || ns == kShardMergeRecipientsNamespace.ns() ||
-        ns == kTenantMigrationRecipientsNamespace.ns() || ns == kShardSplitDonorsNamespace.ns() ||
-        ns == kConfigsvrShardsNamespace.ns();
+        ns == kTenantMigrationRecipientsNamespace.ns() || ns == kConfigsvrShardsNamespace.ns();
 }
 
 NamespaceString NamespaceString::makeBulkWriteNSS(const boost::optional<TenantId>& tenantId) {
@@ -269,6 +268,67 @@ void NamespaceString::serializeCollectionName(BSONObjBuilder* builder, StringDat
     } else {
         builder->append(fieldName, coll());
     }
+}
+
+bool NamespaceString::isDropPendingNamespace() const {
+    return coll().startsWith(dropPendingNSPrefix);
+}
+
+NamespaceString NamespaceString::makeDropPendingNamespace(const repl::OpTime& opTime) const {
+    StringBuilder ss;
+    ss << db_deprecated() << "." << dropPendingNSPrefix;
+    ss << opTime.getSecs() << "i" << opTime.getTimestamp().getInc() << "t" << opTime.getTerm();
+    ss << "." << coll();
+    return NamespaceString(tenantId(), ss.stringData());
+}
+
+StatusWith<repl::OpTime> NamespaceString::getDropPendingNamespaceOpTime() const {
+    if (!isDropPendingNamespace()) {
+        return Status(ErrorCodes::BadValue, fmt::format("Not a drop-pending namespace: {}", ns()));
+    }
+
+    auto collectionName = coll();
+    auto opTimeBeginIndex = dropPendingNSPrefix.size();
+    auto opTimeEndIndex = collectionName.find('.', opTimeBeginIndex);
+    auto opTimeStr = std::string::npos == opTimeEndIndex
+        ? collectionName.substr(opTimeBeginIndex)
+        : collectionName.substr(opTimeBeginIndex, opTimeEndIndex - opTimeBeginIndex);
+
+    auto incrementSeparatorIndex = opTimeStr.find('i');
+    if (std::string::npos == incrementSeparatorIndex) {
+        return Status(ErrorCodes::FailedToParse,
+                      fmt::format("Missing 'i' separator in drop-pending namespace: {}", ns()));
+    }
+
+    auto termSeparatorIndex = opTimeStr.find('t', incrementSeparatorIndex);
+    if (std::string::npos == termSeparatorIndex) {
+        return Status(ErrorCodes::FailedToParse,
+                      fmt::format("Missing 't' separator in drop-pending namespace: {}", ns()));
+    }
+
+    long long seconds;
+    auto status = NumberParser{}(opTimeStr.substr(0, incrementSeparatorIndex), &seconds);
+    if (!status.isOK()) {
+        return status.withContext(
+            fmt::format("Invalid timestamp seconds in drop-pending namespace: {}", ns()));
+    }
+
+    unsigned int increment;
+    status = NumberParser{}(opTimeStr.substr(incrementSeparatorIndex + 1,
+                                             termSeparatorIndex - (incrementSeparatorIndex + 1)),
+                            &increment);
+    if (!status.isOK()) {
+        return status.withContext(
+            fmt::format("Invalid timestamp increment in drop-pending namespace: {}", ns()));
+    }
+
+    long long term;
+    status = mongo::NumberParser{}(opTimeStr.substr(termSeparatorIndex + 1), &term);
+    if (!status.isOK()) {
+        return status.withContext(fmt::format("Invalid term in drop-pending namespace: {}", ns()));
+    }
+
+    return repl::OpTime(Timestamp(Seconds(seconds), increment), term);
 }
 
 bool NamespaceString::isNamespaceAlwaysUntracked() const {

@@ -1070,6 +1070,14 @@ const StringMap<ApplyOpMetadata> kOpsMap = {
           const auto& entry = *op;
           const auto& cmd = entry.getObject();
           auto nss = extractNsFromUUIDorNs(opCtx, entry.getNss(), entry.getUuid(), cmd);
+          if (nss.isDropPendingNamespace()) {
+              LOGV2(21253,
+                    "applyCommand: collection is already in a drop-pending state, ignoring "
+                    "collection drop",
+                    logAttrs(nss),
+                    "command"_attr = redact(cmd));
+              return Status::OK();
+          }
           // Parse optime from oplog entry unless we are applying this command in standalone or on a
           // primary (replicated writes enabled).
           OpTime opTime;
@@ -2537,7 +2545,7 @@ Status applyCommand_inlock(OperationContext* opCtx,
         }
     }
 
-    AuthorizationManager::get(opCtx->getService())->logOp(opCtx, "c", nss, o, nullptr);
+    AuthorizationManager::get(opCtx->getService())->notifyDDLOperation(opCtx, "c", nss, o, nullptr);
     return Status::OK();
 }
 

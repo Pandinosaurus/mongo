@@ -1464,14 +1464,6 @@ void ReplicationCoordinatorImpl::signalWriterDrainComplete(OperationContext* opC
                                                            long long termWhenExhausted) noexcept {
     stdx::lock_guard<stdx::mutex> lk(_mutex);
 
-    if (_oplogSyncState == OplogSyncState::WriterDrainingForShardSplit) {
-        _oplogSyncState = OplogSyncState::ApplierDrainingForShardSplit;
-        auto memberState = _getMemberState(lk);
-        invariant(memberState.secondary() || memberState.startup());
-        _externalState->onWriterDrainComplete(opCtx);
-        return;
-    }
-
     if (_oplogSyncState != OplogSyncState::WriterDraining) {
         LOGV2(8938400, "Writer already left draining state, exiting");
         return;
@@ -1489,23 +1481,6 @@ void ReplicationCoordinatorImpl::signalWriterDrainComplete(OperationContext* opC
 
 void ReplicationCoordinatorImpl::signalApplierDrainComplete(OperationContext* opCtx,
                                                             long long termWhenExhausted) noexcept {
-    {
-        stdx::unique_lock<stdx::mutex> lk(_mutex);
-        if (_oplogSyncState ==
-            ReplicationCoordinator::OplogSyncState::ApplierDrainingForShardSplit) {
-            _oplogSyncState = OplogSyncState::Stopped;
-            auto memberState = _getMemberState(lk);
-            invariant(memberState.secondary() || memberState.startup());
-            _externalState->onApplierDrainComplete(opCtx);
-
-            if (_finishedDrainingPromise) {
-                _finishedDrainingPromise->emplaceValue();
-                _finishedDrainingPromise = boost::none;
-            }
-
-            return;
-        }
-    }
 
     // This logic is a little complicated in order to avoid acquiring the RSTL in mode X
     // unnecessarily.  This is important because the applier may call signalApplierDrainComplete()
@@ -2556,6 +2531,11 @@ BSONObj ReplicationCoordinatorImpl::_getReplicationProgress(WithLock wl) const {
     const auto currentCommittedSnapshotOpTime = _getCurrentCommittedSnapshotOpTime(wl);
     progress.append("currentCommittedSnapshotOpTime", currentCommittedSnapshotOpTime.toBSON());
 
+    const auto earliestDropPendingOpTime = _externalState->getEarliestDropPendingOpTime();
+    if (earliestDropPendingOpTime) {
+        progress.append("earliestDropPendingOpTime", earliestDropPendingOpTime->toBSON());
+    }
+
     _topCoord->fillMemberData(&progress);
     return progress.obj();
 }
@@ -2880,13 +2860,10 @@ std::shared_ptr<const HelloResponse> ReplicationCoordinatorImpl::awaitHelloRespo
         status = Status(ErrorCodes::Error(errorCode),
                         "Set by setCustomErrorInHelloResponseMongoD fail point.");
     });
-
-    if (!status.isOK()) {
-        LOGV2_DEBUG(6208204, 1, "Error while waiting for hello response", "status"_attr = status);
-
-        // We decrement the counter on most errors. Note that some errors may already be covered
-        // by calls to resetNumAwaitingTopologyChangesForAllSessionManagers(), which sets the
-        // counter to zero, so we only decrement non-zero counters. This is safe so long as:
+    ON_BLOCK_EXIT([&, opCtx] {
+        // We decrement the counter. Note that some errors may already be covered
+        // by calls to resetNumAwaitingTopologyChanges(), which sets the counter to zero, so we
+        // only decrement non-zero counters. This is safe so long as:
         // 1) Increment + decrement calls always occur at a 1:1 ratio and in that order.
         // 2) All callers to increment/decrement/reset take locks.
         stdx::lock_guard lk(_mutex);
@@ -2894,12 +2871,16 @@ std::shared_ptr<const HelloResponse> ReplicationCoordinatorImpl::awaitHelloRespo
             HelloMetrics::get(opCtx)->getNumAwaitingTopologyChanges() > 0) {
             HelloMetrics::get(opCtx)->decrementNumAwaitingTopologyChanges();
         }
+    });
+    if (!status.isOK()) {
+        LOGV2_DEBUG(6208204, 1, "Error while waiting for hello response", "status"_attr = status);
 
         // Return a HelloResponse with the current topology version on timeout when waiting for
         // a topology change.
         if (status == ErrorCodes::ExceededTimeLimit) {
             // A topology change has not occured within the deadline so horizonString is still a
             // good indicator of whether we have a valid config.
+            stdx::lock_guard lk(_mutex);
             const bool hasValidConfig = horizonString != boost::none;
             return _makeHelloResponse(horizonString, lk, hasValidConfig);
         }
@@ -3980,13 +3961,6 @@ Status ReplicationCoordinatorImpl::setMaintenanceMode(OperationContext* opCtx, b
     lk.unlock();
     _performPostMemberStateUpdateAction(action);
     return Status::OK();
-}
-
-bool ReplicationCoordinatorImpl::shouldDropSyncSourceAfterShardSplit(const OID replicaSetId) const {
-    if (!_settings.isServerless()) {
-        return false;
-    }
-    return replicaSetId != _rsConfig.getConfig().getReplicaSetId();
 }
 
 Status ReplicationCoordinatorImpl::processReplSetSyncFrom(OperationContext* opCtx,
@@ -5457,19 +5431,6 @@ void ReplicationCoordinatorImpl::_enterDrainMode(WithLock) {
     _externalState->stopProducer();
 }
 
-Future<void> ReplicationCoordinatorImpl::_drainForShardSplit() {
-    stdx::lock_guard<stdx::mutex> lk(_mutex);
-    invariant(!_finishedDrainingPromise.has_value());
-    auto [promise, future] = makePromiseFuture<void>();
-    _finishedDrainingPromise = std::move(promise);
-    _oplogSyncState = feature_flags::gReduceMajorityWriteLatency.isEnabled(
-                          serverGlobalParams.featureCompatibility.acquireFCVSnapshot())
-        ? OplogSyncState::WriterDrainingForShardSplit
-        : OplogSyncState::ApplierDrainingForShardSplit;
-    _externalState->stopProducer();
-    return std::move(future);
-}
-
 ReplicationCoordinatorImpl::PostMemberStateUpdateAction
 ReplicationCoordinatorImpl::_setCurrentRSConfig(WithLock lk,
                                                 OperationContext* opCtx,
@@ -5895,14 +5856,6 @@ ChangeSyncSourceAction ReplicationCoordinatorImpl::shouldChangeSyncSource(
     const rpc::OplogQueryMetadata& oqMetadata,
     const OpTime& previousOpTimeFetched,
     const OpTime& lastOpTimeFetched) const {
-    if (shouldDropSyncSourceAfterShardSplit(replMetadata.getReplicaSetId())) {
-        // Drop the last batch of message following a change of replica set due to a shard split.
-        LOGV2(6394902,
-              "Choosing new sync source because we left the replica set due to a shard split.",
-              "currentReplicaSetId"_attr = _rsConfig.getConfig().getReplicaSetId(),
-              "otherReplicaSetId"_attr = replMetadata.getReplicaSetId());
-        return ChangeSyncSourceAction::kStopSyncingAndDropLastBatchIfPresent;
-    }
 
     stdx::lock_guard<stdx::mutex> lock(_mutex);
     const auto now = _replExecutor->now();

@@ -666,7 +666,6 @@ buildvariants:
         --ocsp-stapling=off
         -j$(grep -c ^processor /proc/cpuinfo)
         --link-model=dynamic
-        BAZEL_FLAGS="--features=-thin_archive"
         ENABLE_GRPC_BUILD=1
       compile_variant: *linux-debug-aubsan-compile-grpc
       large_distro_name: rhel80-xlarge
@@ -691,3 +690,4 @@ buildvariants:
       - name: .jscore .common !sharding_uninitialized_fcv_jscore_passthrough_gen !embedded_router_jscore_passthrough_with_balancer_gen !.auth !.txns
       - name: sharded_jscore_txns
       - name: .aggregation !.auth !aggregation_read_concern_majority_passthrough !aggregation_secondary_reads_gen
+      - name: .grpc_misc_js

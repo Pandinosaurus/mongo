@@ -78,6 +78,22 @@ mongo_cc_library(
     ],
 )
 
+mongo_cc_library(
+    name = "drop_pending_collection_reaper",
+    srcs = [
+        "drop_pending_collection_reaper.cpp",
+    ],
+    hdrs = [
+        "drop_pending_collection_reaper.h",
+    ],
+    deps = [
+        ":optime",  # TODO(SERVER-93876): Remove.
+        ":storage_interface",  # TODO(SERVER-93876): Remove.
+        "//src/mongo/db:server_base",
+        "//src/mongo/db:service_context",
+    ],
+)
+
 idl_generator(
     name = "rollback_impl_gen",
     src = "rollback_impl.idl",
@@ -716,6 +732,7 @@ mongo_cc_library(
         "//src/mongo/db:write_concern_gen",
         "//src/mongo/db:yieldable.h",
         "//src/mongo/db/auth:authorization_manager.h",
+        "//src/mongo/db/auth:authorization_router.h",
         "//src/mongo/db/auth:builtin_roles.h",
         "//src/mongo/db/auth:ldap_cumulative_operation_stats.h",
         "//src/mongo/db/auth:ldap_operation_stats.h",
@@ -1515,7 +1532,6 @@ mongo_cc_library(
         "//src/mongo/db/commands:server_status_core",
         "//src/mongo/db/commands:tenant_migration_cmds_request",
         "//src/mongo/db/concurrency:exception_util",
-        "//src/mongo/db/serverless:shard_split_state_machine",
         "//src/mongo/executor:network_interface_factory",
         "//src/mongo/executor:thread_pool_task_executor",
         "//src/mongo/util:future_util",
