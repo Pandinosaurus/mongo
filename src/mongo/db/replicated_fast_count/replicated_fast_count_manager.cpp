@@ -61,35 +61,10 @@ void ReplicatedFastCountManager::startup(OperationContext* opCtx) {
             "ReplicatedFastCountManager background thread already running. It should only be "
             "started up once.",
             !_backgroundThread.joinable());
-    {
-        auto acquisition = _acquireFastCountCollectionForWrite(opCtx);
 
-        uassert(
-            11718600, "Expected fastcount collection to exist on startup", acquisition.has_value());
-
-        stdx::lock_guard lock(_metadataMutex);
-
-        const auto startTime = Date_t::now();
-        int numRecordsScanned = 0;
-
-        auto cursor = acquisition->getCollectionPtr()->getCursor(opCtx);
-        while (auto record = cursor->next()) {
-            Record& rec = *record;
-            UUID uuid = _UUIDForKey(rec.id);
-            BSONObj data = rec.data.releaseToBson();
-
-            ++numRecordsScanned;
-
-            auto& meta = _metadata[uuid];
-            meta.sizeCount.count = data.getField(kCountKey).Long();
-            meta.sizeCount.size = data.getField(kSizeKey).Long();
-        }
-
-        LOGV2(11648801,
-              "ReplicatedFastCountManager::startup initialization complete",
-              "numRecordsScanned"_attr = numRecordsScanned,
-              "duration"_attr = Date_t::now() - startTime);
-    }
+    massert(11718600,
+            "Expected fastcount collection to exist on startup",
+            _acquireFastCountCollectionForRead(opCtx).has_value());
 
     if (!_isUnderTest) {
         _isEnabled.store(true);
@@ -109,6 +84,45 @@ void ReplicatedFastCountManager::shutdown() {
     _backgroundThread.join();
 
     LOGV2(11751501, "ReplicatedFastCountManager stopped");
+}
+
+int ReplicatedFastCountManager::_hydrateMetadataFromDisk(
+    OperationContext* opCtx, const CollectionOrViewAcquisition& acquisition) {
+    int numRecordsScanned = 0;
+    stdx::lock_guard lock(_metadataMutex);
+    auto cursor = acquisition.getCollectionPtr()->getCursor(opCtx);
+    while (auto record = cursor->next()) {
+        Record& rec = *record;
+        UUID uuid = _UUIDForKey(rec.id);
+        BSONObj data = rec.data.releaseToBson();
+
+        ++numRecordsScanned;
+
+        auto& meta = _metadata[uuid];
+        meta.sizeCount.count = data.getField(kCountKey).Long();
+        meta.sizeCount.size = data.getField(kSizeKey).Long();
+    }
+    return numRecordsScanned;
+}
+
+void ReplicatedFastCountManager::initializeMetadata(OperationContext* opCtx) {
+
+    auto acquisition = _acquireFastCountCollectionForRead(opCtx);
+
+    if (!acquisition.has_value()) {
+        // This should only be the case on cold boot.
+        LOGV2(11999600, "Internal fastcount collection not present during initialization.");
+        return;
+    }
+
+    const auto startTime = Date_t::now();
+
+    const int numRecordsScanned = _hydrateMetadataFromDisk(opCtx, *acquisition);
+
+    LOGV2(11648801,
+          "ReplicatedFastCountManager initialization complete",
+          "numRecordsScanned"_attr = numRecordsScanned,
+          "duration"_attr = Date_t::now() - startTime);
 }
 
 void ReplicatedFastCountManager::commit(
@@ -340,6 +354,24 @@ ReplicatedFastCountManager::_acquireFastCountCollectionForWrite(OperationContext
                                         NamespaceString::kSystemReplicatedFastCountStore),
                                     AcquisitionPrerequisites::OperationType::kWrite),
                                 LockMode::MODE_IX);
+
+    if (acquisition.getCollectionPtr()) {
+        return acquisition;
+    }
+
+    return boost::none;
+}
+
+boost::optional<CollectionOrViewAcquisition>
+ReplicatedFastCountManager::_acquireFastCountCollectionForRead(OperationContext* opCtx) {
+    CollectionOrViewAcquisition acquisition =
+        acquireCollectionOrView(opCtx,
+                                CollectionOrViewAcquisitionRequest::fromOpCtx(
+                                    opCtx,
+                                    NamespaceString::makeGlobalConfigCollection(
+                                        NamespaceString::kSystemReplicatedFastCountStore),
+                                    AcquisitionPrerequisites::OperationType::kRead),
+                                LockMode::MODE_IS);
 
     if (acquisition.getCollectionPtr()) {
         return acquisition;

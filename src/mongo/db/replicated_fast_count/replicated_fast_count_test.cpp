@@ -470,7 +470,7 @@ TEST_F(ReplicatedFastCountTest, StartupFailsIfFastCountCollectionNotPresent) {
     ASSERT_THROWS_CODE(_fastCountManager->startup(_opCtx), DBException, 11718600);
 }
 
-TEST_F(ReplicatedFastCountTest, StartupInitializesMetadataFromExistingInternalCollection) {
+TEST_F(ReplicatedFastCountTest, InitializePopulatesMetadataFromExistingInternalCollection) {
     RAIIServerParameterControllerForTest featureFlag("featureFlagReplicatedFastCount", true);
 
     // Pre-populate the internal replicated fast count collection with two entries.
@@ -517,9 +517,9 @@ TEST_F(ReplicatedFastCountTest, StartupInitializesMetadataFromExistingInternalCo
     replicated_fast_count_test_helpers::checkCommittedFastCountChanges(
         uuid2, _fastCountManager, /*expectedCount=*/0, /*expectedSize=*/0);
 
-    _fastCountManager->startup(_opCtx);
+    _fastCountManager->initializeMetadata(_opCtx);
 
-    // After startup(), the in-memory _metadata map should reflect the persisted values.
+    // The in-memory _metadata map should reflect the persisted values.
     replicated_fast_count_test_helpers::checkCommittedFastCountChanges(
         uuid1, _fastCountManager, expectedCount1, expectedSize1);
     replicated_fast_count_test_helpers::checkCommittedFastCountChanges(

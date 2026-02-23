@@ -119,6 +119,12 @@ public:
     void shutdown();
 
     /**
+     * Initializes state for the ReplicatedFastCountManager. Populates in-memory _metadata values
+     * with those persisted on disk. Should be performed once per start-up.
+     */
+    void initializeMetadata(OperationContext* opCtx);
+
+    /**
      * Records committed changes to the size and count for the collections in 'changes'.
      */
     void commit(const boost::container::flat_map<UUID, CollectionSizeCount>& changes,
@@ -198,11 +204,25 @@ private:
                             const CollectionSizeCount& sizeCount);
 
     /**
-     * Acquire the fastcount collection that underpins this class.
+     * Acquire the fastcount collection that underpins this class with write intent.
      * Returns boost::none if it doesn't exist.
      */
     boost::optional<CollectionOrViewAcquisition> _acquireFastCountCollectionForWrite(
         OperationContext* opCtx);
+
+    /**
+     * Acquire the fastcount collection that underpins this class with read intent.
+     * Returns boost::none if it doesn't exist.
+     */
+    boost::optional<CollectionOrViewAcquisition> _acquireFastCountCollectionForRead(
+        OperationContext* opCtx);
+
+    /**
+     * Populates the in-memory values of _metadata with the values persisted in the internal fast
+     * count collection. Returns the number of records that were scanned.
+     */
+    int _hydrateMetadataFromDisk(OperationContext* opCtx,
+                                 const CollectionOrViewAcquisition& acquisition);
 
     /**
      * Formats and returns the document to write to the fastcount collection.
