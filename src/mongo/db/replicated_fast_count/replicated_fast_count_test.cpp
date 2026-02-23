@@ -48,6 +48,12 @@
 namespace mongo {
 namespace {
 class ReplicatedFastCountTest : public CatalogTestFixture {
+public:
+    ReplicatedFastCountTest()
+        : CatalogTestFixture(Options().setPersistenceProvider(
+              std::make_unique<
+                  replicated_fast_count_test_helpers::ReplicatedFastCountPersistenceProvider>())) {}
+
 protected:
     void setUp() override {
         CatalogTestFixture::setUp();
