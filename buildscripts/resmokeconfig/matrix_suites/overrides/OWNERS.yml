@@ -66,3 +66,6 @@ filters:
   - "no_causal_consistency.yml":
     approvers:
       - 10gen/server-replication-reviewers
+  - "drop_config_cache_collections_hook.yml":
+    approvers:
+      - 10gen/server-catalog-and-routing-shard-catalog
