@@ -61,7 +61,7 @@ SamplingEstimatorMap makeSamplingEstimators(const MultipleCollectionAccessor& co
                     cq->nss(),
                     yieldPolicy,
                     qkc.getInternalJoinPlanSamplingSize(),
-                    qkc.getInternalQuerySamplingCEMethod(),
+                    qkc.getInternalJoinOptimizationSamplingCEMethod(),
                     qkc.getNumChunksForChunkBasedSampling(),
                     ce::CardinalityEstimate{numRecords,
                                             cost_based_ranker::EstimationSource::Metadata});
